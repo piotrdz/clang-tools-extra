@@ -70,6 +70,7 @@ List of clang-tidy Checks
    readability-identifier-naming
    readability-implicit-bool-cast
    readability-inconsistent-declaration-parameter-name
+   readability-localizing-variables
    readability-named-parameter
    readability-redundant-smartptr-get
    readability-redundant-string-cstr

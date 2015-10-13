@@ -17,6 +17,7 @@
 #include "IdentifierNamingCheck.h"
 #include "ImplicitBoolCastCheck.h"
 #include "InconsistentDeclarationParameterNameCheck.h"
+#include "LocalizingVariablesCheck.h"
 #include "NamedParameterCheck.h"
 #include "RedundantSmartptrGetCheck.h"
 #include "RedundantStringCStrCheck.h"
@@ -44,6 +45,8 @@ public:
         "readability-implicit-bool-cast");
     CheckFactories.registerCheck<InconsistentDeclarationParameterNameCheck>(
         "readability-inconsistent-declaration-parameter-name");
+    CheckFactories.registerCheck<LocalizingVariablesCheck>(
+        "readability-localizing-variables");
     CheckFactories.registerCheck<UniqueptrDeleteReleaseCheck>(
         "readability-uniqueptr-delete-release");
     CheckFactories.registerCheck<readability::NamedParameterCheck>(
