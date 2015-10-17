@@ -12,7 +12,7 @@ void variableDeclarationAndAssignmentTogether() {
 }
 
 void variableDeclarationAndAssignmentInNextLine() {
-  // CHECK-MESSAGES: :[[@LINE+2]]:3: note: declaration of variable 'a' is separated from its first point of use [readability-localizing-variables]
+  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a' can be localized by moving it closer to its uses [readability-localizing-variables]
   // CHECK-FIX: {{^}}{{$}}
   // CHECK-FIX: {{^}}  int a = 1;{{$}}
   int a;
@@ -20,7 +20,7 @@ void variableDeclarationAndAssignmentInNextLine() {
 }
 
 void variableDeclarationAndAssignmentSeparatedByEmptyLine() {
-  // CHECK-MESSAGES: :[[@LINE+2]]:3: note: declaration of variable 'a'
+  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
   // CHECK-FIX: {{^}}{{$}}
   // CHECK-FIX: {{^}}  int a = 1;{{$}}
   int a;
@@ -29,7 +29,7 @@ void variableDeclarationAndAssignmentSeparatedByEmptyLine() {
 }
 
 void variableDeclarationAndAssignmentSeparatedByOtherStatement() {
-  // CHECK-MESSAGES: :[[@LINE+2]]:3: note: declaration of variable 'a'
+  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
   // CHECK-FIX: {{^}}{{$}}
   // CHECK-FIX: {{^}}  int a = 1;{{$}}
   int a;
@@ -46,7 +46,7 @@ void variableDeclarationAndUseInExpressionWithoutAnythingBetween() {
 }
 
 void variableDeclarationAndUseInExpressionSeparatedByEmptyLine() {
-  // CHECK-MESSAGES: :[[@LINE+2]]:3: note: declaration of variable 'a'
+  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
   // CHECK-FIX: {{^}}{{$}}
   // CHECK-FIX: {{^}}  int a;{{$}}
   int a;
@@ -55,7 +55,7 @@ void variableDeclarationAndUseInExpressionSeparatedByEmptyLine() {
 }
 
 void variableDeclarationAndUseInExpressionSeparatedByOtherStatement() {
-  // CHECK-MESSAGES: :[[@LINE+2]]:3: note: declaration of variable 'a'
+  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
   // CHECK-FIX: {{^}}{{$}}
   // CHECK-FIX: {{^}}  int a;{{$}}
   int a;
@@ -72,7 +72,7 @@ void variableDeclarationAndChainedAssignmentWithoutAnythingBetween() {
 }
 
 void variableDeclarationAndChainedAssignmentSeparatedByEmptyLine() {
-  // CHECK-MESSAGES: :[[@LINE+2]]:3: note: declaration of variables 'a', 'b'
+  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variables 'a', 'b'
   // CHECK-FIX: {{^}}{{$}}
   // CHECK-FIX: {{^}}  int a, b;{{$}}
   int a, b;
