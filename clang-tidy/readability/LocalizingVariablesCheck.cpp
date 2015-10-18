@@ -20,6 +20,11 @@ namespace tidy {
 
 namespace {
 
+AST_MATCHER_P(Expr, ignoringCasts, ast_matchers::internal::Matcher<Expr>,
+              InnerMatcher) {
+  return InnerMatcher.matches(*Node.IgnoreCasts(), Finder, Builder);
+}
+
 struct ScopeContext {
   const Stmt *Statement = nullptr;
   SourceLocation InsertLocationForDeclarationsBeforeScope;
@@ -33,6 +38,8 @@ struct DeclarationStatementContext {
   int ScopeIndex = 0;
   int TotalDeclarationsCount = 0;
   int DeclarationsToBeRemovedCount = 0;
+  SourceLocation NextStatementInsertLocation;
+  bool IsFollowedByAnotherDeclarationStatement = false;
 };
 
 using DeclarationStatementContextContainer =
@@ -91,21 +98,24 @@ private:
   void popScope();
 
   void processSingleStatement(SourceLocation InsertLocationBeforeStatement,
-                              const Stmt *Statement);
+                              const Stmt *Statement,
+                              bool AllowAssignmentInsertions = false);
 
   void processDeclarationStatement(const DeclStmt *DeclarationStatement);
   void processDeclarationUsesInStatement(
-      SourceLocation InsertLocationBeforeStatement, const Stmt *Statement);
+      SourceLocation InsertLocationBeforeStatement, const Stmt *Statement,
+      bool AllowAssignmentInsertions);
 
   void localizeVariable(const VariableDeclarationContext &VariableDeclaration,
-                        const DeclarationStatementContext &DeclarationStatement,
-                        SourceLocation NewLocation);
+                        SourceLocation NewLocation,
+                        VariableInsertType InsertType);
 
   void dump();
 
   LocalizingVariablesCheck &Check;
   ASTContext &Context;
   ScopeIndexContainer CurrentScopeStack;
+  bool WasPreviousStatementADeclarationStatement = false;
   ScopeContextContainer Scopes;
   DeclarationStatementContextContainer DeclarationStatements;
   VariableDeclarationContextContainer VariableDeclarations;
@@ -175,6 +185,8 @@ void LocalizingVariablesHandler::processStatement(const Stmt *Statement) {
   case Stmt::CXXCatchStmtClass:
     return processCatchStatement(llvm::cast<CXXCatchStmt>(Statement));
 
+  // TODO: handle switch and case statements.
+
   default:
     processGenericStatement(Statement);
   }
@@ -187,7 +199,27 @@ void LocalizingVariablesHandler::processCompoundStatement(
 }
 
 void LocalizingVariablesHandler::processIfStatement(const IfStmt *IfStatement) {
-  // TODO: process if expression, body, but how does it work?
+  processSingleStatement(IfStatement->getLocStart(), IfStatement->getCond());
+
+  processNestedScope(IfStatement->getLocStart(), IfStatement->getThen());
+
+  const Stmt *ElseStatement = IfStatement->getElse();
+  while (ElseStatement != nullptr) {
+    const auto *ChainedIfStatement = llvm::dyn_cast<IfStmt>(ElseStatement);
+
+    if (ChainedIfStatement != nullptr) {
+      // Chained "else if" scope.
+      processSingleStatement(IfStatement->getLocStart(),
+                             ChainedIfStatement->getCond());
+      processNestedScope(IfStatement->getLocStart(),
+                         ChainedIfStatement->getThen());
+      ElseStatement = ChainedIfStatement->getElse();
+    } else {
+      // Regular else scope (final else statement).
+      processNestedScope(IfStatement->getLocStart(), ElseStatement);
+      ElseStatement = nullptr;
+    }
+  }
 }
 
 void LocalizingVariablesHandler::processForStatement(
@@ -232,7 +264,9 @@ void LocalizingVariablesHandler::processCatchStatement(
 
 void LocalizingVariablesHandler::processGenericStatement(
     const Stmt *GenericStatement) {
-  processSingleStatement(GenericStatement->getLocStart(), GenericStatement);
+  const bool AllowAssignmentInsertions = true;
+  processSingleStatement(GenericStatement->getLocStart(), GenericStatement,
+                         AllowAssignmentInsertions);
 }
 
 void LocalizingVariablesHandler::processNestedScope(
@@ -284,13 +318,25 @@ void LocalizingVariablesHandler::pushScope(
 void LocalizingVariablesHandler::popScope() { CurrentScopeStack.pop_back(); }
 
 void LocalizingVariablesHandler::processSingleStatement(
-    SourceLocation InsertLocationBeforeStatement, const Stmt *Statement) {
+    SourceLocation InsertLocationBeforeStatement, const Stmt *Statement,
+    bool AllowAssignmentInsertions) {
   const auto *DeclarationStatement = llvm::dyn_cast<DeclStmt>(Statement);
+
+  if (WasPreviousStatementADeclarationStatement) {
+    DeclarationStatements.back().NextStatementInsertLocation =
+        InsertLocationBeforeStatement;
+    DeclarationStatements.back().IsFollowedByAnotherDeclarationStatement =
+        DeclarationStatement != nullptr;
+  }
+
   if (DeclarationStatement != nullptr) {
     processDeclarationStatement(DeclarationStatement);
   }
 
-  processDeclarationUsesInStatement(InsertLocationBeforeStatement, Statement);
+  processDeclarationUsesInStatement(InsertLocationBeforeStatement, Statement,
+                                    AllowAssignmentInsertions);
+
+  WasPreviousStatementADeclarationStatement = DeclarationStatement != nullptr;
 }
 
 void LocalizingVariablesHandler::processDeclarationStatement(
@@ -330,10 +376,25 @@ void LocalizingVariablesHandler::processDeclarationStatement(
 }
 
 void LocalizingVariablesHandler::processDeclarationUsesInStatement(
-    SourceLocation InsertLocationBeforeStatement, const Stmt *Statement) {
+    SourceLocation InsertLocationBeforeStatement, const Stmt *Statement,
+    bool AllowAssignmentInsertions) {
+
+  const VarDecl *SimplyAssignedVariable = nullptr;
+  if (AllowAssignmentInsertions) {
+    auto SimpleAssignmentMatcher = binaryOperator(
+        hasOperatorName("="), hasLHS(ignoringCasts(declRefExpr(
+                                  to(varDecl().bind("assignedVarDecl"))))),
+        unless(hasRHS(ignoringCasts(binaryOperator(hasOperatorName("="))))));
+    auto AssignmentMatchResult =
+        match(SimpleAssignmentMatcher, *Statement, Context);
+    if (!AssignmentMatchResult.empty()) {
+      SimplyAssignedVariable =
+          AssignmentMatchResult[0].getNodeAs<VarDecl>("assignedVarDecl");
+    }
+  }
+
   auto VariableUsesMatcher =
       findAll(declRefExpr(to(varDecl().bind("varDecl"))).bind("declRefExpr"));
-
   auto MatchResults = match(VariableUsesMatcher, *Statement, Context);
   for (const auto &Result : MatchResults) {
     const auto *ReferenceExpression =
@@ -353,9 +414,11 @@ void LocalizingVariablesHandler::processDeclarationUsesInStatement(
     NewVariableUseContext.Statement = ReferenceExpression;
     NewVariableUseContext.ScopeStack = CurrentScopeStack;
     NewVariableUseContext.InsertLocation = InsertLocationBeforeStatement;
-    NewVariableUseContext.InsertType = VariableInsertType::AsDeclaration;
-    // ^ TODO: detect also assignment statements and mark them with
-    // VariableInsertType::AsAssignment
+    if (VariableDeclaration == SimplyAssignedVariable) {
+      NewVariableUseContext.InsertType = VariableInsertType::AsAssignment;
+    } else {
+      NewVariableUseContext.InsertType = VariableInsertType::AsDeclaration;
+    }
 
     VariableDeclarationIt->Uses.push_back(std::move(NewVariableUseContext));
   }
@@ -367,14 +430,16 @@ void LocalizingVariablesHandler::dump() {
     std::cerr << " " << ScopeIndex;
   }
   std::cerr << std::endl;
+  std::cerr << "WasPreviousStatementADeclarationStatement: "
+            << WasPreviousStatementADeclarationStatement << std::endl;
 
   std::cerr << "Scopes:" << std::endl;
   int Index = 0;
   for (const ScopeContext &Scope : Scopes) {
     std::cerr << " Scope #" << (Index++) << std::endl;
-    std::cerr << "  Statement:      "
-              << static_cast<const void *>(Scope.Statement) << std::endl;
-    std::cerr << "  InsertLocation: ";
+    std::cerr << "  Statement: " << static_cast<const void *>(Scope.Statement)
+              << std::endl;
+    std::cerr << "  InsertLocationForDeclarationsBeforeScope: ";
     Scope.InsertLocationForDeclarationsBeforeScope.dump(
         Context.getSourceManager());
     std::cerr << std::endl;
@@ -385,15 +450,22 @@ void LocalizingVariablesHandler::dump() {
   for (const DeclarationStatementContext &DeclarationStatement :
        DeclarationStatements) {
     std::cerr << " DeclarationStatement #" << (Index++) << std::endl;
-    std::cerr << "  Statement:                 "
+    std::cerr << "  Statement: "
               << static_cast<const void *>(DeclarationStatement.Statement)
               << std::endl;
-    std::cerr << "  ScopeIndex:                "
-              << DeclarationStatement.ScopeIndex << std::endl;
-    std::cerr << "  VariablesDeclaredCount:    "
+    std::cerr << "  ScopeIndex: " << DeclarationStatement.ScopeIndex
+              << std::endl;
+    std::cerr << "  TotalDeclarationsCount: "
               << DeclarationStatement.TotalDeclarationsCount << std::endl;
-    std::cerr << "  VariablesToBeRemovedCount: "
+    std::cerr << "  DeclarationsToBeRemovedCount: "
               << DeclarationStatement.DeclarationsToBeRemovedCount << std::endl;
+    std::cerr << "  NextStatementInsertLocation: ";
+    DeclarationStatement.NextStatementInsertLocation.dump(
+        Context.getSourceManager());
+    std::cerr << std::endl;
+    std::cerr << "  IsFollowedByAnotherDeclarationStatement: "
+              << DeclarationStatement.IsFollowedByAnotherDeclarationStatement
+              << std::endl;
   }
 
   std::cerr << "VariableDeclarations:" << std::endl;
@@ -401,7 +473,7 @@ void LocalizingVariablesHandler::dump() {
   for (const VariableDeclarationContext &VariableDeclaration :
        VariableDeclarations) {
     std::cerr << " VariableDeclaration #" << (Index++) << std::endl;
-    std::cerr << "  Declaration:               "
+    std::cerr << "  Declaration: "
               << static_cast<const void *>(VariableDeclaration.Declaration)
               << std::endl;
     std::cerr << "  DeclarationStatementIndex: "
@@ -411,21 +483,20 @@ void LocalizingVariablesHandler::dump() {
     int SubIndex = 0;
     for (const VariableUseContext &VariableUse : VariableDeclaration.Uses) {
       std::cerr << "   VariableUse #" << (SubIndex++) << std::endl;
-      std::cerr << "    Statement:      "
+      std::cerr << "    Statement: "
                 << static_cast<const void *>(VariableUse.Statement)
                 << std::endl;
-      std::cerr << "    ScopeStack:    ";
+      std::cerr << "    ScopeStack:";
       for (int ScopeIndex : VariableUse.ScopeStack)
         std::cerr << " " << ScopeIndex;
       std::cerr << std::endl;
       std::cerr << "    InsertLocation: ";
       VariableUse.InsertLocation.dump(Context.getSourceManager());
       std::cerr << std::endl;
-      std::cerr << "    InsertType:     "
-                << ((VariableUse.InsertType ==
-                     VariableInsertType::AsDeclaration)
-                        ? "AsDeclaration"
-                        : "AsAssignment")
+      std::cerr << "    InsertType: " << ((VariableUse.InsertType ==
+                                           VariableInsertType::AsDeclaration)
+                                              ? "AsDeclaration"
+                                              : "AsAssignment")
                 << std::endl;
     }
   }
@@ -480,8 +551,8 @@ void LocalizingVariablesHandler::onEndOfFunction() {
         VariableDeclaration.Uses.front().ScopeStack;
     if (FirstUseScopeStack == *MaximumCommonScopeStack) {
       const VariableUseContext &FirstUse = VariableDeclaration.Uses.front();
-      localizeVariable(VariableDeclaration, DeclarationStatement,
-                       FirstUse.InsertLocation);
+      localizeVariable(VariableDeclaration, FirstUse.InsertLocation,
+                       FirstUse.InsertType);
       continue;
     }
 
@@ -491,21 +562,47 @@ void LocalizingVariablesHandler::onEndOfFunction() {
     const ScopeContext &MaximumCommonScope =
         Scopes[MaximumCommonScopeStack->back()];
     localizeVariable(
-        VariableDeclaration, DeclarationStatement,
-        MaximumCommonScope.InsertLocationForDeclarationsBeforeScope);
+        VariableDeclaration,
+        MaximumCommonScope.InsertLocationForDeclarationsBeforeScope,
+        VariableInsertType::AsDeclaration);
   }
 }
 
-// TODO: handle properly the case of removing whole DeclStmt
 // TODO: handle properly the case of converting single statement scopes to
 // compound scopes
-// TODO: properly detect when we can move declaration (there are other
-// statements, or empty lines between old and new location)
 
 void LocalizingVariablesHandler::localizeVariable(
     const VariableDeclarationContext &VariableDeclaration,
-    const DeclarationStatementContext &DeclarationStatement,
-    SourceLocation NewLocation) {
+    SourceLocation NewLocation, VariableInsertType InsertType) {
+
+  if (InsertType == VariableInsertType::AsDeclaration) {
+    // First, make sure that we are not doing something stupid - moving the
+    // variable declaration to a location just after the declaration block,
+    // e.g.:
+    //  int a;
+    //  int b;
+    //  use(a);
+    //  ^ move "a" declaration here
+    for (size_t DeclarationStatementIndex =
+             VariableDeclaration.DeclarationStatementIndex;
+         DeclarationStatementIndex < DeclarationStatements.size();
+         ++DeclarationStatementIndex) {
+      // Are we inserting just after this declaration?
+      if (DeclarationStatements[DeclarationStatementIndex]
+              .NextStatementInsertLocation == NewLocation) {
+        return;
+      }
+      // We can also have consecutive declaration statements.
+      if (!DeclarationStatements[DeclarationStatementIndex]
+               .IsFollowedByAnotherDeclarationStatement) {
+        break;
+      }
+    }
+  }
+
+  DeclarationStatementContext &DeclarationStatement =
+      DeclarationStatements[VariableDeclaration.DeclarationStatementIndex];
+
   auto Diagnostic = Check.diag(VariableDeclaration.Declaration->getLocStart(),
                                "declaration of variable '%0' can be localized "
                                "by moving it closer to its uses")
@@ -527,8 +624,13 @@ void LocalizingVariablesHandler::localizeVariable(
   std::string DeclarationCode =
       VariableDeclaration.Declaration->getType().getAsString();
   DeclarationCode += " ";
-  DeclarationCode += VariableDeclaration.Declaration->getNameAsString();
-  DeclarationCode += "; ";
+  if (InsertType == VariableInsertType::AsDeclaration) {
+    DeclarationCode += VariableDeclaration.Declaration->getNameAsString();
+    DeclarationCode += "; ";
+  }
+  // There is no else as in case of assignment, variable name is already in the
+  // following expression.
+
   Diagnostic.AddFixItHint(
       FixItHint::CreateInsertion(NewLocation, DeclarationCode));
 }

@@ -46,11 +46,14 @@ void variableDeclarationAndUseInExpressionWithoutAnythingBetween() {
 }
 
 void variableDeclarationAndUseInExpressionSeparatedByEmptyLine() {
-  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
-  // CHECK-FIX: {{^}}{{$}}
-  // CHECK-FIX: {{^}}  int a;{{$}}
   int a;
 
+  useByReference(a);
+}
+
+void variableDeclarationAndUseInExpressionSeparatedByOtherDeclarationLine() {
+  int a;
+  int b;
   useByReference(a);
 }
 
@@ -72,13 +75,30 @@ void variableDeclarationAndChainedAssignmentWithoutAnythingBetween() {
 }
 
 void variableDeclarationAndChainedAssignmentSeparatedByEmptyLine() {
-  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variables 'a', 'b'
-  // CHECK-FIX: {{^}}{{$}}
-  // CHECK-FIX: {{^}}  int a, b;{{$}}
   int a, b;
 
   a = b = returnValue();
 }
+
+void variableDeclarationAndChainedAssignmentSeparatedByAnotherDeclarationBlock() {
+  int a, b;
+  int c;
+
+  a = b = returnValue();
+}
+
+void variableDeclarationAndChainedAssignmentSeparatedByOtherExpression() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'b'
+  // CHECK-FIX: {{^}}{{$}}
+  // CHECK-FIX: {{^}}  int a; int b; a = b = returnValue();{{$}}
+  int a, b;
+  call();
+
+  a = b = returnValue();
+}
+
+// TODO: check nested scopes, control statements, etc.
 
 // TODO: check for correct removal of selected declarations in multiple declarations:
 // int a, b, c;  // e.g. remove only "b"
