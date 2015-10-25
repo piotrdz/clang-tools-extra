@@ -1,4 +1,4 @@
-// RUN: %python %S/check_clang_tidy.py %s readability-localizing-variables %t
+// RUN: %check_clang_tidy %s readability-localizing-variables %t
 
 int returnValue();
 void useByReference(int& a);
