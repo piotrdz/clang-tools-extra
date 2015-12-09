@@ -36,8 +36,6 @@ using ScopeIndexContainer = llvm::SmallVector<int, 5>;
 struct DeclarationStatementContext {
   const DeclStmt *Statement = nullptr;
   int ScopeIndex = 0;
-  int TotalDeclarationsCount = 0;
-  int DeclarationsToBeRemovedCount = 0;
   SourceLocation NextStatementInsertLocation;
   bool IsFollowedByAnotherDeclarationStatement = false;
 };
@@ -56,14 +54,19 @@ struct VariableUseContext {
 
 using ScopeUseContainer = llvm::SmallVector<VariableUseContext, 10>;
 
+enum class DeclarationStatus { Keep, ToBeMovedAsDeclaration, ToBeMovedAsAssignment, AlreadyMoved };
+
 struct VariableDeclarationContext {
   const VarDecl *Declaration;
   int DeclarationStatementIndex;
+  DeclarationStatus Status;
   ScopeUseContainer Uses;
 };
 
 using VariableDeclarationContextContainer =
     llvm::SmallVector<VariableDeclarationContext, 10>;
+
+using VariableDeclarationPtrContainer = llvm::SmallVector<VariableDeclarationContext*, 1>;
 
 class LocalizingVariablesHandler {
 public:
@@ -106,9 +109,15 @@ private:
       SourceLocation InsertLocationBeforeStatement, const Stmt *Statement,
       bool AllowAssignmentInsertions);
 
-  void localizeVariable(const VariableDeclarationContext &VariableDeclaration,
+  void localizeVariable(VariableDeclarationContext &VariableDeclaration,
                         SourceLocation NewLocation,
                         VariableInsertType InsertType);
+
+  void emitDiagnostics();
+  void addFixItHintsToDiagnostic(DiagnosticBuilder& Diagnostic,
+                                 const llvm::DenseSet<int>& AffectedDeclarationStatementIndexes,
+                                 StringRef DeclarationCode,
+                                 SourceLocation MoveLocation);
 
   void dump();
 
@@ -119,6 +128,7 @@ private:
   ScopeContextContainer Scopes;
   DeclarationStatementContextContainer DeclarationStatements;
   VariableDeclarationContextContainer VariableDeclarations;
+  llvm::DenseMap<unsigned, VariableDeclarationPtrContainer> LocalizedDeclarations;
 };
 
 } // anonymous namespace
@@ -345,13 +355,10 @@ void LocalizingVariablesHandler::processDeclarationStatement(
   NewDeclarationStatementContext.Statement = DeclarationStatement;
   int CurrentScopeIndex = Scopes.size() - 1;
   NewDeclarationStatementContext.ScopeIndex = CurrentScopeIndex;
-  NewDeclarationStatementContext.TotalDeclarationsCount = 0;
 
   int NewDeclarationStatementContextIndex = DeclarationStatements.size();
 
   for (const Decl *Declaration : DeclarationStatement->decls()) {
-    NewDeclarationStatementContext.TotalDeclarationsCount++;
-
     const auto *VariableDeclaration = llvm::dyn_cast<VarDecl>(Declaration);
     if (VariableDeclaration == nullptr) {
       continue;
@@ -369,6 +376,7 @@ void LocalizingVariablesHandler::processDeclarationStatement(
     NewVariableDeclarationContext.Declaration = VariableDeclaration;
     NewVariableDeclarationContext.DeclarationStatementIndex =
         NewDeclarationStatementContextIndex;
+    NewVariableDeclarationContext.Status = DeclarationStatus::Keep;
     VariableDeclarations.push_back(std::move(NewVariableDeclarationContext));
   }
 
@@ -455,10 +463,6 @@ void LocalizingVariablesHandler::dump() {
               << std::endl;
     std::cerr << "  ScopeIndex: " << DeclarationStatement.ScopeIndex
               << std::endl;
-    std::cerr << "  TotalDeclarationsCount: "
-              << DeclarationStatement.TotalDeclarationsCount << std::endl;
-    std::cerr << "  DeclarationsToBeRemovedCount: "
-              << DeclarationStatement.DeclarationsToBeRemovedCount << std::endl;
     std::cerr << "  NextStatementInsertLocation: ";
     DeclarationStatement.NextStatementInsertLocation.dump(
         Context.getSourceManager());
@@ -505,11 +509,7 @@ void LocalizingVariablesHandler::dump() {
 void LocalizingVariablesHandler::onEndOfFunction() {
   dump();
 
-  for (const VariableDeclarationContext &VariableDeclaration :
-       VariableDeclarations) {
-    DeclarationStatementContext &DeclarationStatement =
-        DeclarationStatements[VariableDeclaration.DeclarationStatementIndex];
-
+  for (VariableDeclarationContext &VariableDeclaration : VariableDeclarations) {
     llvm::Optional<ScopeIndexContainer> MaximumCommonScopeStack;
 
     for (const VariableUseContext &Use : VariableDeclaration.Uses) {
@@ -543,8 +543,6 @@ void LocalizingVariablesHandler::onEndOfFunction() {
     assert(MaximumCommonScopeStack->size() >= 1 &&
            "Variable uses must share at least one common scope");
 
-    DeclarationStatement.DeclarationsToBeRemovedCount++;
-
     // First use of variable is exactly in the maximum common scope stack we
     // found. We can safely move the declaration to a location before this use.
     const auto &FirstUseScopeStack =
@@ -566,73 +564,138 @@ void LocalizingVariablesHandler::onEndOfFunction() {
         MaximumCommonScope.InsertLocationForDeclarationsBeforeScope,
         VariableInsertType::AsDeclaration);
   }
+
+  emitDiagnostics();
 }
 
 // TODO: handle properly the case of converting single statement scopes to
 // compound scopes
 
 void LocalizingVariablesHandler::localizeVariable(
-    const VariableDeclarationContext &VariableDeclaration,
+    VariableDeclarationContext &VariableDeclaration,
     SourceLocation NewLocation, VariableInsertType InsertType) {
 
   if (InsertType == VariableInsertType::AsDeclaration) {
-    // First, make sure that we are not doing something stupid - moving the
+    // Make sure that we are not doing something stupid - moving the
     // variable declaration to a location just after the declaration block,
     // e.g.:
     //  int a;
     //  int b;
     //  use(a);
     //  ^ move "a" declaration here
-    for (size_t DeclarationStatementIndex =
-             VariableDeclaration.DeclarationStatementIndex;
-         DeclarationStatementIndex < DeclarationStatements.size();
-         ++DeclarationStatementIndex) {
+    for (size_t Index = VariableDeclaration.DeclarationStatementIndex; Index < DeclarationStatements.size(); ++Index) {
       // Are we inserting just after this declaration?
-      if (DeclarationStatements[DeclarationStatementIndex]
-              .NextStatementInsertLocation == NewLocation) {
+      if (DeclarationStatements[Index].NextStatementInsertLocation == NewLocation) {
         return;
       }
       // We can also have consecutive declaration statements.
-      if (!DeclarationStatements[DeclarationStatementIndex]
-               .IsFollowedByAnotherDeclarationStatement) {
-        break;
+      if (DeclarationStatements[Index].IsFollowedByAnotherDeclarationStatement) {
+        continue;
+      }
+      // Stop if there are no more consecutive declarations.
+      break;
+    }
+  }
+
+  if (InsertType == VariableInsertType::AsDeclaration) {
+    VariableDeclaration.Status = DeclarationStatus::ToBeMovedAsDeclaration;
+  } else if (InsertType == VariableInsertType::AsAssignment) {
+    VariableDeclaration.Status = DeclarationStatus::ToBeMovedAsAssignment;
+  }
+  VariableDeclarationPtrContainer& MovedDeclarations = LocalizedDeclarations[NewLocation.getRawEncoding()];
+  // Moving variable as assignment should always be the last element in array.
+  // This ensures correct generation of FixIt hints, e.g. "int decl; int assign = ", not the other way around.
+  if (!MovedDeclarations.empty() && MovedDeclarations.front()->Status == DeclarationStatus::ToBeMovedAsAssignment) {
+    MovedDeclarations.insert(MovedDeclarations.end()-1, &VariableDeclaration);
+  } else {
+    MovedDeclarations.push_back(&VariableDeclaration);
+  }
+}
+
+void LocalizingVariablesHandler::emitDiagnostics() {
+  for (auto& LocalizedDeclaration : LocalizedDeclarations) {
+    SourceLocation NewLocation = SourceLocation::getFromRawEncoding(LocalizedDeclaration.first);
+    VariableDeclarationPtrContainer& MovedVariableDeclarations = LocalizedDeclaration.second;
+
+    std::string DeclarationCode;
+
+    llvm::DenseSet<int> AffectedDeclarationStatementIndexes;
+    for (VariableDeclarationContext* VariableDeclaration : MovedVariableDeclarations) {
+      DeclarationCode += VariableDeclaration->Declaration->getType().getAsString();
+      DeclarationCode += " ";
+      if (VariableDeclaration->Status == DeclarationStatus::ToBeMovedAsDeclaration) {
+        DeclarationCode += VariableDeclaration->Declaration->getNameAsString();
+        DeclarationCode += "; ";
+      }
+
+      AffectedDeclarationStatementIndexes.insert(VariableDeclaration->DeclarationStatementIndex);
+    }
+
+    bool First = true;
+    for (VariableDeclarationContext* VariableDeclaration : MovedVariableDeclarations) {
+      auto Diagnostic = Check.diag(VariableDeclaration->Declaration->getLocStart(),
+                                 "declaration of variable '%0' can be localized "
+                                 "by moving it closer to its uses")
+                    << VariableDeclaration->Declaration->getName();
+
+      if (First) {
+        First = false;
+        addFixItHintsToDiagnostic(Diagnostic, AffectedDeclarationStatementIndexes, DeclarationCode, NewLocation);
+      }
+    }
+  }
+}
+
+void LocalizingVariablesHandler::addFixItHintsToDiagnostic(
+    DiagnosticBuilder& Diagnostic,
+    const llvm::DenseSet<int>& AffectedDeclarationStatementIndexes,
+    StringRef DeclarationCode,
+    SourceLocation MoveLocation) {
+  for (int DeclarationStatementIndex : AffectedDeclarationStatementIndexes) {
+    const auto& DeclarationStatement = DeclarationStatements[DeclarationStatementIndex];
+
+    int DeclarationsToBeRemovedCount = 0;
+    int TotalDeclarationsCount = 0;
+
+    for (const auto& VariableDeclaration : VariableDeclarations) {
+      if (VariableDeclaration.DeclarationStatementIndex == DeclarationStatementIndex) {
+        ++TotalDeclarationsCount;
+        if (VariableDeclaration.Status == DeclarationStatus::ToBeMovedAsDeclaration ||
+            VariableDeclaration.Status == DeclarationStatus::ToBeMovedAsAssignment) {
+          ++DeclarationsToBeRemovedCount;
+        }
+      }
+    }
+
+    if (DeclarationsToBeRemovedCount == TotalDeclarationsCount) {
+      Diagnostic.AddFixItHint(
+          FixItHint::CreateRemoval(CharSourceRange::getTokenRange(
+              DeclarationStatement.Statement->getLocStart(),
+              DeclarationStatement.Statement->getLocEnd())));
+    } else {
+      for (const auto& VariableDeclaration : VariableDeclarations) {
+        if (VariableDeclaration.DeclarationStatementIndex == DeclarationStatementIndex &&
+            (VariableDeclaration.Status == DeclarationStatus::ToBeMovedAsDeclaration ||
+              VariableDeclaration.Status == DeclarationStatus::ToBeMovedAsAssignment)) {
+          Diagnostic.AddFixItHint(
+            FixItHint::CreateRemoval(CharSourceRange::getTokenRange(
+              VariableDeclaration.Declaration->getLocStart(),
+              VariableDeclaration.Declaration->getLocEnd())));
+        }
+      }
+    }
+
+    for (auto& VariableDeclaration : VariableDeclarations) {
+      if (VariableDeclaration.DeclarationStatementIndex == DeclarationStatementIndex &&
+          (VariableDeclaration.Status == DeclarationStatus::ToBeMovedAsDeclaration ||
+            VariableDeclaration.Status == DeclarationStatus::ToBeMovedAsAssignment)) {
+        VariableDeclaration.Status = DeclarationStatus::AlreadyMoved;
       }
     }
   }
 
-  DeclarationStatementContext &DeclarationStatement =
-      DeclarationStatements[VariableDeclaration.DeclarationStatementIndex];
-
-  auto Diagnostic = Check.diag(VariableDeclaration.Declaration->getLocStart(),
-                               "declaration of variable '%0' can be localized "
-                               "by moving it closer to its uses")
-                    << VariableDeclaration.Declaration->getName();
-
-  if (DeclarationStatement.DeclarationsToBeRemovedCount ==
-      DeclarationStatement.TotalDeclarationsCount) {
-    Diagnostic.AddFixItHint(
-        FixItHint::CreateRemoval(CharSourceRange::getTokenRange(
-            DeclarationStatement.Statement->getLocStart(),
-            DeclarationStatement.Statement->getLocEnd())));
-  } else {
-    Diagnostic.AddFixItHint(
-        FixItHint::CreateRemoval(CharSourceRange::getTokenRange(
-            VariableDeclaration.Declaration->getLocStart(),
-            VariableDeclaration.Declaration->getLocEnd())));
-  }
-
-  std::string DeclarationCode =
-      VariableDeclaration.Declaration->getType().getAsString();
-  DeclarationCode += " ";
-  if (InsertType == VariableInsertType::AsDeclaration) {
-    DeclarationCode += VariableDeclaration.Declaration->getNameAsString();
-    DeclarationCode += "; ";
-  }
-  // There is no else as in case of assignment, variable name is already in the
-  // following expression.
-
   Diagnostic.AddFixItHint(
-      FixItHint::CreateInsertion(NewLocation, DeclarationCode));
+    FixItHint::CreateInsertion(MoveLocation, DeclarationCode));
 }
 
 } // namespace tidy
