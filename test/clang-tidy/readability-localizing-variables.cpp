@@ -2,6 +2,7 @@
 
 int returnValue();
 void useByReference(int& a);
+int useByReferenceAndReturn(int& a);
 void call();
 
 
@@ -13,25 +14,17 @@ void variableDeclarationAndAssignmentTogether() {
 
 void variableDeclarationAndAssignmentInNextLine() {
   // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a' can be localized by moving it closer to its uses [readability-localizing-variables]
-  // CHECK-FIX: {{^}}{{$}}
-  // CHECK-FIX: {{^}}  int a = 1;{{$}}
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int a = 1;{{$}}
   int a;
-  a = 1;
-}
-
-void variableDeclarationAndAssignmentSeparatedByEmptyLine() {
-  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
-  // CHECK-FIX: {{^}}{{$}}
-  // CHECK-FIX: {{^}}  int a = 1;{{$}}
-  int a;
-
   a = 1;
 }
 
 void variableDeclarationAndAssignmentSeparatedByOtherStatement() {
-  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
-  // CHECK-FIX: {{^}}{{$}}
-  // CHECK-FIX: {{^}}  int a = 1;{{$}}
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  call();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int a = 1;{{$}}
   int a;
   call();
   a = 1;
@@ -45,12 +38,6 @@ void variableDeclarationAndUseInExpressionWithoutAnythingBetween() {
   useByReference(a);
 }
 
-void variableDeclarationAndUseInExpressionSeparatedByEmptyLine() {
-  int a;
-
-  useByReference(a);
-}
-
 void variableDeclarationAndUseInExpressionSeparatedByOtherDeclarationLine() {
   int a;
   int b;
@@ -58,12 +45,27 @@ void variableDeclarationAndUseInExpressionSeparatedByOtherDeclarationLine() {
 }
 
 void variableDeclarationAndUseInExpressionSeparatedByOtherStatement() {
-  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'a'
-  // CHECK-FIX: {{^}}{{$}}
-  // CHECK-FIX: {{^}}  int a;{{$}}
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  call();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int a; useByReference(a);{{$}}
   int a;
   call();
   useByReference(a);
+}
+
+
+/////// Special case - variable assignment and use in expression in same line
+
+void variableDeclarationAndAssignmentAndUseInExpressionInSameLine() {
+  // CHECK-MESSAGES: :[[@LINE+5]]:3: warning: declaration of variable 'a'
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'b'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  call();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int b; int a = useByReferenceAndReturn(b);{{$}}
+  int a, b;
+  call();
+  a = useByReferenceAndReturn(b);
 }
 
 
@@ -71,12 +73,6 @@ void variableDeclarationAndUseInExpressionSeparatedByOtherStatement() {
 
 void variableDeclarationAndChainedAssignmentWithoutAnythingBetween() {
   int a, b;
-  a = b = returnValue();
-}
-
-void variableDeclarationAndChainedAssignmentSeparatedByEmptyLine() {
-  int a, b;
-
   a = b = returnValue();
 }
 
@@ -88,13 +84,13 @@ void variableDeclarationAndChainedAssignmentSeparatedByAnotherDeclarationBlock()
 }
 
 void variableDeclarationAndChainedAssignmentSeparatedByOtherExpression() {
-  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
-  // CHECK-MESSAGES: :[[@LINE+3]]:3: warning: declaration of variable 'b'
-  // CHECK-FIX: {{^}}{{$}}
-  // CHECK-FIX: {{^}}  int a; int b; a = b = returnValue();{{$}}
+  // CHECK-MESSAGES: :[[@LINE+5]]:3: warning: declaration of variable 'a'
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'b'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  call();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int a; int b; a = b = returnValue();{{$}}
   int a, b;
   call();
-
   a = b = returnValue();
 }
 
