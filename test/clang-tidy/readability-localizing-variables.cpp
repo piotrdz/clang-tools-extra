@@ -394,9 +394,22 @@ void variableUsedInTryAndCatchBlocks() {
   }
 }
 
-// TODO: check switch, case statements
+/////// Nested single-statement scopes
 
-// TODO: check for correct insertion of braces in single-statement bodies, e.g. if (x) single_stmt();
+void variableUsedInSingleStatementIf() {
+  // CHECK-MESSAGES: :[[@LINE+5]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    if (true){{$}}
+  // CHECK-FIXES-NEXT: {{^}}      { int a = returnValue(); }{{$}}
+  int a;
+  {
+    if (true)
+      a = returnValue();
+  }
+}
+
+// TODO: check switch, case statements
 
 // TODO: check for correct removal of selected declarations in multiple declarations:
 // int a, b, c;  // e.g. remove only "b"

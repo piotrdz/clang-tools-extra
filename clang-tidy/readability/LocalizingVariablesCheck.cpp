@@ -10,7 +10,9 @@
 #include "LocalizingVariablesCheck.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/Lex/Lexer.h"
 
+#include <map>
 #include <iostream>
 
 using namespace clang::ast_matchers;
@@ -20,6 +22,52 @@ namespace tidy {
 
 namespace {
 
+// Shamelessly stolen from Clang's lib/ARCMigrate/Transforms.cpp
+
+SourceLocation findSemiAfterLocation(SourceLocation loc, ASTContext &Ctx,
+                                     bool IsDecl = false) {
+  SourceManager &SM = Ctx.getSourceManager();
+  if (loc.isMacroID()) {
+    if (!Lexer::isAtEndOfMacroExpansion(loc, SM, Ctx.getLangOpts(), &loc))
+      return SourceLocation();
+  }
+  loc = Lexer::getLocForEndOfToken(loc, /*Offset=*/0, SM, Ctx.getLangOpts());
+
+  // Break down the source location.
+  std::pair<FileID, unsigned> locInfo = SM.getDecomposedLoc(loc);
+
+  // Try to load the file buffer.
+  bool invalidTemp = false;
+  StringRef file = SM.getBufferData(locInfo.first, &invalidTemp);
+  if (invalidTemp)
+    return SourceLocation();
+
+  const char *tokenBegin = file.data() + locInfo.second;
+
+  // Lex from the start of the given location.
+  Lexer lexer(SM.getLocForStartOfFile(locInfo.first), Ctx.getLangOpts(),
+              file.begin(), tokenBegin, file.end());
+  Token tok;
+  lexer.LexFromRawLexer(tok);
+  if (tok.isNot(tok::semi)) {
+    if (!IsDecl)
+      return SourceLocation();
+    // Declaration may be followed with other tokens; such as an __attribute,
+    // before ending with a semicolon.
+    return findSemiAfterLocation(tok.getLocation(), Ctx, /*IsDecl*/ true);
+  }
+
+  return tok.getLocation();
+}
+
+SourceLocation findLocationAfterSemi(SourceLocation loc, ASTContext &Ctx,
+                                     bool IsDecl = false) {
+  SourceLocation SemiLoc = findSemiAfterLocation(loc, Ctx, IsDecl);
+  if (SemiLoc.isInvalid())
+    return SourceLocation();
+  return SemiLoc.getLocWithOffset(1);
+}
+
 AST_MATCHER_P(Expr, ignoringCasts, ast_matchers::internal::Matcher<Expr>,
               InnerMatcher) {
   return InnerMatcher.matches(*Node.IgnoreCasts(), Finder, Builder);
@@ -28,6 +76,8 @@ AST_MATCHER_P(Expr, ignoringCasts, ast_matchers::internal::Matcher<Expr>,
 struct ScopeContext {
   const Stmt *Statement = nullptr;
   SourceLocation InsertLocationForDeclarationsBeforeScope;
+  bool NeedsSurroundingBraces;
+  SourceLocation EndLocation;
 };
 
 using ScopeContextContainer = llvm::SmallVector<ScopeContext, 5>;
@@ -74,6 +124,16 @@ using VariableDeclarationContextContainer =
 using VariableDeclarationPtrContainer =
     llvm::SmallVector<VariableDeclarationContext *, 1>;
 
+struct LocalizedVariableLocationInfo {
+  SourceLocation NewLocation;
+  int NewScopeIndex;
+};
+
+bool operator<(const LocalizedVariableLocationInfo &LHS,
+               const LocalizedVariableLocationInfo &RHS) {
+  return LHS.NewLocation.getRawEncoding() < RHS.NewLocation.getRawEncoding();
+}
+
 class LocalizingVariablesHandler {
 public:
   LocalizingVariablesHandler(LocalizingVariablesCheck &Check,
@@ -102,8 +162,9 @@ private:
   processSingleStatementNestedScope(SourceLocation InsertLocationBeforeScope,
                                     const Stmt *SingleStatementNestedScope);
 
-  void pushScope(SourceLocation InsertLocationForDeclarationsBeforeScope,
-                 const Stmt *ScopeStatement);
+  ScopeContext &
+  pushScope(SourceLocation InsertLocationForDeclarationsBeforeScope,
+            const Stmt *ScopeStatement);
   void popScope();
 
   void processSingleStatement(SourceLocation InsertLocationBeforeStatement,
@@ -123,7 +184,7 @@ private:
       SourceLocation NewLocation);
 
   void localizeVariable(VariableDeclarationContext &VariableDeclaration,
-                        SourceLocation NewLocation,
+                        const LocalizedVariableLocationInfo &LocationInfo,
                         VariableInsertType InsertType);
 
   void emitDiagnostics();
@@ -131,7 +192,8 @@ private:
   void addFixItHintsToDiagnostic(
       DiagnosticBuilder &Diagnostic,
       const llvm::DenseSet<int> &AffectedDeclarationStatementIndexes,
-      StringRef DeclarationCode, SourceLocation MoveLocation);
+      std::string DeclarationCode,
+      const LocalizedVariableLocationInfo &LocationInfo);
 
   void dump();
 
@@ -142,7 +204,7 @@ private:
   ScopeContextContainer Scopes;
   DeclarationStatementContextContainer DeclarationStatements;
   VariableDeclarationContextContainer VariableDeclarations;
-  llvm::DenseMap<unsigned, VariableDeclarationPtrContainer>
+  std::map<LocalizedVariableLocationInfo, VariableDeclarationPtrContainer>
       LocalizedDeclarations;
 };
 
@@ -322,20 +384,27 @@ void LocalizingVariablesHandler::processCompoundNestedScope(
 void LocalizingVariablesHandler::processSingleStatementNestedScope(
     SourceLocation InsertLocationBeforeScope,
     const Stmt *SingleStatementNestedScope) {
-  pushScope(InsertLocationBeforeScope, SingleStatementNestedScope);
+  ScopeContext &NewScope =
+      pushScope(InsertLocationBeforeScope, SingleStatementNestedScope);
+  NewScope.NeedsSurroundingBraces = true;
+  NewScope.EndLocation =
+      findLocationAfterSemi(SingleStatementNestedScope->getLocEnd(), Context);
 
-  processSingleStatement(InsertLocationBeforeScope, SingleStatementNestedScope);
+  const bool AllowAssignmentInsertions = true;
+  processSingleStatement(SingleStatementNestedScope->getLocStart(),
+                         SingleStatementNestedScope, AllowAssignmentInsertions);
 
   popScope();
 }
 
-void LocalizingVariablesHandler::pushScope(
+ScopeContext &LocalizingVariablesHandler::pushScope(
     SourceLocation InsertLocationForDeclarationsBeforeScope,
     const Stmt *ScopeStatement) {
   ScopeContext NewScopeContext;
   NewScopeContext.InsertLocationForDeclarationsBeforeScope =
       InsertLocationForDeclarationsBeforeScope;
   NewScopeContext.Statement = ScopeStatement;
+  NewScopeContext.NeedsSurroundingBraces = false;
   Scopes.push_back(std::move(NewScopeContext));
 
   int NewScopeIndex = Scopes.size() - 1;
@@ -347,6 +416,9 @@ void LocalizingVariablesHandler::pushScope(
   }
 
   WasPreviousStatementADeclarationStatement = false;
+
+  ScopeContext &NewScope = Scopes.back();
+  return NewScope;
 }
 
 void LocalizingVariablesHandler::popScope() {
@@ -479,6 +551,11 @@ void LocalizingVariablesHandler::dump() {
     Scope.InsertLocationForDeclarationsBeforeScope.dump(
         Context.getSourceManager());
     std::cerr << std::endl;
+    std::cerr << "  NeedsSurroundingBraces: " << Scope.NeedsSurroundingBraces
+              << std::endl;
+    std::cerr << "  EndLocation: ";
+    Scope.EndLocation.dump(Context.getSourceManager());
+    std::cerr << std::endl;
   }
 
   std::cerr << "DeclarationStatements:" << std::endl;
@@ -595,8 +672,12 @@ void LocalizingVariablesHandler::onEndOfFunction() {
         VariableDeclaration.Uses.front().ScopeStack;
     if (FirstUseScopeStack == CommonScopeStack) {
       const VariableUseContext &FirstUse = VariableDeclaration.Uses.front();
-      localizeVariable(VariableDeclaration, FirstUse.InsertLocation,
-                       FirstUse.InsertType);
+
+      LocalizedVariableLocationInfo LocationInfo;
+      LocationInfo.NewScopeIndex = FirstUseScopeStack.back();
+      LocationInfo.NewLocation = FirstUse.InsertLocation;
+
+      localizeVariable(VariableDeclaration, LocationInfo, FirstUse.InsertType);
       continue;
     }
 
@@ -629,18 +710,18 @@ void LocalizingVariablesHandler::onEndOfFunction() {
     //
 
     assert(FirstUseScopeStack.size() > CommonScopeStack.size());
-    int NewScopeIndex = FirstUseScopeStack[CommonScopeStack.size()];
-    const ScopeContext &NewScope = Scopes[NewScopeIndex];
-    localizeVariable(VariableDeclaration,
-                     NewScope.InsertLocationForDeclarationsBeforeScope,
+
+    LocalizedVariableLocationInfo LocationInfo;
+    LocationInfo.NewScopeIndex = FirstUseScopeStack[CommonScopeStack.size()];
+    LocationInfo.NewLocation = Scopes[LocationInfo.NewScopeIndex]
+                                   .InsertLocationForDeclarationsBeforeScope;
+
+    localizeVariable(VariableDeclaration, LocationInfo,
                      VariableInsertType::AsDeclaration);
   }
 
   emitDiagnostics();
 }
-
-// TODO: handle properly the case of converting single statement scopes to
-// compound scopes
 
 bool LocalizingVariablesHandler::
     isNewLocationPresentInTheSameBlockOfDeclarations(
@@ -660,7 +741,8 @@ bool LocalizingVariablesHandler::
 }
 
 void LocalizingVariablesHandler::localizeVariable(
-    VariableDeclarationContext &VariableDeclaration, SourceLocation NewLocation,
+    VariableDeclarationContext &VariableDeclaration,
+    const LocalizedVariableLocationInfo &LocationInfo,
     VariableInsertType InsertType) {
 
   // Make sure that we are not doing something stupid, namely moving a variable
@@ -671,8 +753,8 @@ void LocalizingVariablesHandler::localizeVariable(
   //  // <- move "a" declaration here
   //  use(a);
   if (InsertType == VariableInsertType::AsDeclaration &&
-      isNewLocationPresentInTheSameBlockOfDeclarations(VariableDeclaration,
-                                                       NewLocation)) {
+      isNewLocationPresentInTheSameBlockOfDeclarations(
+          VariableDeclaration, LocationInfo.NewLocation)) {
     return;
   }
 
@@ -683,7 +765,7 @@ void LocalizingVariablesHandler::localizeVariable(
   }
 
   VariableDeclarationPtrContainer &MovedDeclarations =
-      LocalizedDeclarations[NewLocation.getRawEncoding()];
+      LocalizedDeclarations[LocationInfo];
 
   // Moving variable as assignment should always be the last element in array.
   // This ensures correct generation of FixIt hints, e.g. "int asDecl; "
@@ -699,8 +781,8 @@ void LocalizingVariablesHandler::localizeVariable(
 
 void LocalizingVariablesHandler::emitDiagnostics() {
   for (auto &LocalizedDeclaration : LocalizedDeclarations) {
-    SourceLocation NewLocation =
-        SourceLocation::getFromRawEncoding(LocalizedDeclaration.first);
+    const LocalizedVariableLocationInfo &LocationInfo =
+        LocalizedDeclaration.first;
     VariableDeclarationPtrContainer &MovedVariableDeclarations =
         LocalizedDeclaration.second;
 
@@ -735,7 +817,7 @@ void LocalizingVariablesHandler::emitDiagnostics() {
         First = false;
         addFixItHintsToDiagnostic(Diagnostic,
                                   AffectedDeclarationStatementIndexes,
-                                  DeclarationCode, NewLocation);
+                                  std::move(DeclarationCode), LocationInfo);
       }
     }
   }
@@ -744,7 +826,8 @@ void LocalizingVariablesHandler::emitDiagnostics() {
 void LocalizingVariablesHandler::addFixItHintsToDiagnostic(
     DiagnosticBuilder &Diagnostic,
     const llvm::DenseSet<int> &AffectedDeclarationStatementIndexes,
-    StringRef DeclarationCode, SourceLocation MoveLocation) {
+    std::string DeclarationCode,
+    const LocalizedVariableLocationInfo &LocationInfo) {
   for (int DeclarationStatementIndex : AffectedDeclarationStatementIndexes) {
     const auto &DeclarationStatement =
         DeclarationStatements[DeclarationStatementIndex];
@@ -798,8 +881,18 @@ void LocalizingVariablesHandler::addFixItHintsToDiagnostic(
     }
   }
 
+  const ScopeContext &NewScope = Scopes[LocationInfo.NewScopeIndex];
+  if (NewScope.NeedsSurroundingBraces) {
+    DeclarationCode = "{ " + DeclarationCode;
+  }
+
   Diagnostic.AddFixItHint(
-      FixItHint::CreateInsertion(MoveLocation, DeclarationCode));
+      FixItHint::CreateInsertion(LocationInfo.NewLocation, DeclarationCode));
+
+  if (NewScope.NeedsSurroundingBraces) {
+    Diagnostic.AddFixItHint(
+        FixItHint::CreateInsertion(NewScope.EndLocation, " }"));
+  }
 }
 
 } // namespace tidy
