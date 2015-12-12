@@ -76,21 +76,20 @@ void variableDeclarationAndAssignmentAndUseInExpressionInSameLine() {
 }
 
 
-/////// Chained assignments treated as expressions
+/////// Ignore chained assignments
 
-void variableDeclarationAndChainedAssignmentWithoutAnythingBetween() {
+void variablesDeclarationAndChainedAssignmentWithoutAnythingBetween() {
   int a, b;
   a = b = returnValue();
 }
 
-void variableDeclarationAndChainedAssignmentSeparatedByAnotherDeclarationBlock() {
+void variablesDeclarationAndChainedAssignmentSeparatedByAnotherDeclarationBlock() {
   int a, b;
   int c;
-
   a = b = returnValue();
 }
 
-void variableDeclarationAndChainedAssignmentSeparatedByOtherExpression() {
+void variablesDeclarationAndChainedAssignmentSeparatedByOtherExpression() {
   // CHECK-MESSAGES: :[[@LINE+5]]:3: warning: declaration of variable 'a'
   // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'b'
   // CHECK-FIXES:      {{^}}  {{$}}
@@ -99,6 +98,30 @@ void variableDeclarationAndChainedAssignmentSeparatedByOtherExpression() {
   int a, b;
   call();
   a = b = returnValue();
+}
+
+void variablesDeclaredSeparatelyAndChainedAssignmentSeparatedByOtherExpression() {
+  // CHECK-MESSAGES: :[[@LINE+5]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  call();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int b;{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int a; a = b = returnValue();{{$}}
+  int a;
+  call();
+  int b;
+  a = b = returnValue();
+}
+
+void variablesDeclaredSeparatelyAndChainedAssignmentInReverseOrderSeparatedByOtherExpression() {
+  // CHECK-MESSAGES: :[[@LINE+5]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  call();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int b;{{$}}
+  // CHECK-FIXES-NEXT: {{^}}  int a; b = a = returnValue();{{$}}
+  int a;
+  call();
+  int b;
+  b = a = returnValue();
 }
 
 
@@ -529,8 +552,6 @@ void variableUsedInMoreThanOneUnbracedCaseBody() {
 
 // TODO: check for correct removal of selected declarations in multiple declarations:
 // int a, b, c;  // e.g. remove only "b"
-
-// TODO: check for correct skipping of chained assignments a = b = returnValue(); // <- try to localize "b"
 
 // TODO: check for correct handling of pointers and arrays in multiple declarations:
 // int a, *b, c[10];
