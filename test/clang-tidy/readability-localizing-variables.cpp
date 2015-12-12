@@ -409,10 +409,128 @@ void variableUsedInSingleStatementIf() {
   }
 }
 
-// TODO: check switch, case statements
+////// Switch statement
+
+void variableUsedInSwitchCondition() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    int a; switch (a = returnValue()) {{{$}}
+  int a;
+  {
+    switch (a = returnValue()) {
+    }
+  }
+}
+
+void variableUsedInBracedCaseBody() {
+  // CHECK-MESSAGES: :[[@LINE+6]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    switch (1) {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}      case 1: {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}        int a = returnValue();{{$}}
+  int a;
+  {
+    switch (1) {
+      case 1: {
+        a = returnValue();
+        break;
+      }
+      case 2: {
+        call();
+        break;
+      }
+    }
+  }
+}
+
+void variableUsedInUnbracedCaseBody() {
+  // CHECK-MESSAGES: :[[@LINE+7]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    switch (1) {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}      case 1:{{$}}
+  // CHECK-FIXES-NEXT: {{^}}        { int a = returnValue();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}        break; }{{$}}
+  int a;
+  {
+    switch (1) {
+      case 1:
+        a = returnValue();
+        break;
+      case 2:
+        call();
+        break;
+    }
+  }
+}
+
+void variableUsedInUnbracedFallthroughCaseBody() {
+  // CHECK-MESSAGES: :[[@LINE+8]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    switch (1) {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}      case 1:{{$}}
+  // CHECK-FIXES-NEXT: {{^}}      case 2:{{$}}
+  // CHECK-FIXES-NEXT: {{^}}        { int a = returnValue();{{$}}
+  // CHECK-FIXES-NEXT: {{^}}        break; }{{$}}
+  int a;
+  {
+    switch (1) {
+      case 1:
+      case 2:
+        a = returnValue();
+        break;
+      case 3:
+        call();
+        break;
+    }
+  }
+}
+
+void variableUsedInMoreThanOneBracedCaseBody() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    int a; switch (1) {{{$}}
+  int a;
+  {
+    switch (1) {
+      case 1: {
+        a = returnValue();
+        break;
+      }
+      case 2: {
+        a = returnValue();
+        break;
+      }
+    }
+  }
+}
+
+void variableUsedInMoreThanOneUnbracedCaseBody() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    int a; switch (1) {{{$}}
+  int a;
+  {
+    switch (1) {
+      case 1:
+        a = returnValue();
+        break;
+      case 2:
+        a = returnValue();
+        break;
+    }
+  }
+}
 
 // TODO: check for correct removal of selected declarations in multiple declarations:
 // int a, b, c;  // e.g. remove only "b"
+
+// TODO: check for correct skipping of chained assignments a = b = returnValue(); // <- try to localize "b"
 
 // TODO: check for correct handling of pointers and arrays in multiple declarations:
 // int a, *b, c[10];
