@@ -268,10 +268,10 @@ void variableUsedInForLoopCondition() {
   // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
   // CHECK-FIXES:      {{^}}  {{$}}
   // CHECK-FIXES-NEXT: {{^}}  {{{$}}
-  // CHECK-FIXES-NEXT: {{^}}    int a; for (a = 0; a < 10; ++a) {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    int a; for (useByReference(a); a < 10; ++a) {{{$}}
   int a;
   {
-    for (a = 0; a < 10; ++a) {
+    for (useByReference(a); a < 10; ++a) {
     }
   }
 }
@@ -438,10 +438,10 @@ void variableUsedInSwitchCondition() {
   // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
   // CHECK-FIXES:      {{^}}  {{$}}
   // CHECK-FIXES-NEXT: {{^}}  {{{$}}
-  // CHECK-FIXES-NEXT: {{^}}    int a; switch (a = returnValue()) {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    int a; switch (useByReferenceAndReturn(a)) {{{$}}
   int a;
   {
-    switch (a = returnValue()) {
+    switch (useByReferenceAndReturn(a)) {
     }
   }
 }
@@ -546,6 +546,83 @@ void variableUsedInMoreThanOneUnbracedCaseBody() {
       case 2:
         a = returnValue();
         break;
+    }
+  }
+}
+
+///// Variable used in assignment in statement conditions
+
+void variableUsedInIfConditionWithAssignmentPossible() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    if (int a = returnValue()) {{{$}}
+  int a;
+  {
+    if (a = returnValue()) {
+    }
+  }
+}
+
+void variableUsedInElseIfConditionWithAssignmentPossible() {
+  // CHECK-MESSAGES: :[[@LINE+5]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    if (true) {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    } else if (int a = returnValue()) {{{$}}
+  int a;
+  {
+    if (true) {
+    } else if (a = returnValue()) {
+    }
+  }
+}
+
+void variableUsedInForLoopConditionWithAssignmentPossible() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    for (int a = 0; a < 10; ++a) {{{$}}
+  int a;
+  {
+    for (a = 0; a < 10; ++a) {
+    }
+  }
+}
+
+void variableUsedInForLoopConditionAndBodyWithAssignmentPossible() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    for (int a = 0; a < 10; ++a) {{{$}}
+  int a;
+  {
+    for (a = 0; a < 10; ++a) {
+      a = returnValue();
+    }
+  }
+}
+
+void variableUsedInWhileLoopConditionWithAssignmentPossible() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    while (int a = returnValue()) {{{$}}
+  int a;
+  {
+    while (a = returnValue()) {
+    }
+  }
+}
+
+void variableUsedInSwitchConditionWithAssignmentPossible() {
+  // CHECK-MESSAGES: :[[@LINE+4]]:3: warning: declaration of variable 'a'
+  // CHECK-FIXES:      {{^}}  {{$}}
+  // CHECK-FIXES-NEXT: {{^}}  {{{$}}
+  // CHECK-FIXES-NEXT: {{^}}    switch (int a = returnValue()) {{{$}}
+  int a;
+  {
+    switch (a = returnValue()) {
     }
   }
 }

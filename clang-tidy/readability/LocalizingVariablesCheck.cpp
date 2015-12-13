@@ -135,7 +135,7 @@ bool operator<(const LocalizedVariableLocationInfo &LHS,
   return LHS.NewLocation.getRawEncoding() < RHS.NewLocation.getRawEncoding();
 }
 
-enum class AssignmentInsertionsMode { Allowed, NotAllowed };
+enum class InsertionMode { DeclarationAndAssignment, DeclarationOnly };
 
 class LocalizingVariablesHandler {
 public:
@@ -191,12 +191,12 @@ private:
 
   void processSingleStatement(SourceLocation InsertLocationBeforeStatement,
                               const Stmt *Statement,
-                              AssignmentInsertionsMode InsertionMode);
+                              InsertionMode Mode);
 
   void processDeclarationStatement(const DeclStmt *DeclarationStatement);
   void processDeclarationUsesInStatement(
       SourceLocation InsertLocationBeforeStatement, const Stmt *Statement,
-      AssignmentInsertionsMode InsertionMode);
+      InsertionMode Mode);
 
   ScopeIndexContainer
   findCommonScopeStackForAllUses(const VariableUseContextContainer &Uses);
@@ -306,22 +306,30 @@ void LocalizingVariablesHandler::processCompoundStatement(
 }
 
 void LocalizingVariablesHandler::processIfStatement(const IfStmt *IfStatement) {
+  pushScope(IfStatement->getLocStart(), IfStatement);
+
   processSingleStatement(IfStatement->getLocStart(), IfStatement->getCond(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationAndAssignment);
+
+  popScope();
 
   processNestedScope(IfStatement->getLocStart(), IfStatement->getThen());
 
   const Stmt *ElseStatement = IfStatement->getElse();
   while (ElseStatement != nullptr) {
-    const auto *ChainedIfStatement = llvm::dyn_cast<IfStmt>(ElseStatement);
-
-    if (ChainedIfStatement != nullptr) {
+    if (const auto *ChainedIfStatement =
+            llvm::dyn_cast<IfStmt>(ElseStatement)) {
       // Chained "else if" scope.
+      pushScope(IfStatement->getLocStart(), ChainedIfStatement);
+
       processSingleStatement(IfStatement->getLocStart(),
                              ChainedIfStatement->getCond(),
-                             AssignmentInsertionsMode::NotAllowed);
+                             InsertionMode::DeclarationAndAssignment);
       processNestedScope(IfStatement->getLocStart(),
                          ChainedIfStatement->getThen());
+
+      popScope();
+
       ElseStatement = ChainedIfStatement->getElse();
     } else {
       // Regular else scope (final else statement).
@@ -333,26 +341,35 @@ void LocalizingVariablesHandler::processIfStatement(const IfStmt *IfStatement) {
 
 void LocalizingVariablesHandler::processForStatement(
     const ForStmt *ForStatement) {
+  pushScope(ForStatement->getLocStart(), ForStatement);
+
   processSingleStatement(ForStatement->getLocStart(), ForStatement->getInit(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationAndAssignment);
   processSingleStatement(ForStatement->getLocStart(), ForStatement->getCond(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationOnly);
   processSingleStatement(ForStatement->getLocStart(), ForStatement->getInc(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationOnly);
+
   processNestedScope(ForStatement->getLocStart(), ForStatement->getBody());
+
+  popScope();
 }
 
 void LocalizingVariablesHandler::processWhileStatement(
     const WhileStmt *WhileStatement) {
+  pushScope(WhileStatement->getLocStart(), WhileStatement);
+
   processSingleStatement(WhileStatement->getLocStart(),
                          WhileStatement->getCond(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationAndAssignment);
   processNestedScope(WhileStatement->getLocStart(), WhileStatement->getBody());
+
+  popScope();
 }
 
 void LocalizingVariablesHandler::processDoStatement(const DoStmt *DoStatement) {
   processSingleStatement(DoStatement->getLocStart(), DoStatement->getCond(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationOnly);
   processNestedScope(DoStatement->getLocStart(), DoStatement->getBody());
 }
 
@@ -360,7 +377,7 @@ void LocalizingVariablesHandler::processForRangeStatement(
     const CXXForRangeStmt *ForRangeStatement) {
   processSingleStatement(ForRangeStatement->getLocStart(),
                          ForRangeStatement->getRangeStmt(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationOnly);
   processNestedScope(ForRangeStatement->getLocStart(),
                      ForRangeStatement->getBody());
 }
@@ -384,9 +401,11 @@ void LocalizingVariablesHandler::processCatchStatement(
 
 void LocalizingVariablesHandler::processSwitchStatement(
     const SwitchStmt *SwitchStatement) {
+  pushScope(SwitchStatement->getLocStart(), SwitchStatement);
+
   processSingleStatement(SwitchStatement->getLocStart(),
                          SwitchStatement->getCond(),
-                         AssignmentInsertionsMode::NotAllowed);
+                         InsertionMode::DeclarationAndAssignment);
 
   const Stmt *SwitchBody = SwitchStatement->getBody();
   const auto *CompoundBody = llvm::dyn_cast_or_null<CompoundStmt>(SwitchBody);
@@ -397,6 +416,8 @@ void LocalizingVariablesHandler::processSwitchStatement(
     processSingleStatementNestedScope(SwitchStatement->getLocStart(),
                                       SwitchBody);
   }
+
+  popScope();
 }
 
 void LocalizingVariablesHandler::processSwitchStatementCompoundBody(
@@ -474,7 +495,7 @@ void LocalizingVariablesHandler::processSingleStatementInSwitchBody(
   }
 
   processSingleStatement(Statement->getLocStart(), Statement,
-                         AssignmentInsertionsMode::Allowed);
+                         InsertionMode::DeclarationAndAssignment);
   Scopes[*CurrentVirtualScopeIndex].BraceEndInsertLocation =
       findLocationAfterSemi(Statement->getLocEnd(), Context);
 }
@@ -482,14 +503,13 @@ void LocalizingVariablesHandler::processSingleStatementInSwitchBody(
 void LocalizingVariablesHandler::processGenericStatement(
     const Stmt *GenericStatement) {
   processSingleStatement(GenericStatement->getLocStart(), GenericStatement,
-                         AssignmentInsertionsMode::Allowed);
+                         InsertionMode::DeclarationAndAssignment);
 }
 
 void LocalizingVariablesHandler::processNestedScope(
     SourceLocation InsertLocationBeforeScope, const Stmt *NestedScope) {
-  const auto *CompoundNestedScope =
-      llvm::dyn_cast_or_null<CompoundStmt>(NestedScope);
-  if (CompoundNestedScope != nullptr) {
+  if (const auto *CompoundNestedScope =
+          llvm::dyn_cast_or_null<CompoundStmt>(NestedScope)) {
     processCompoundNestedScope(InsertLocationBeforeScope, CompoundNestedScope);
   } else {
     processSingleStatementNestedScope(InsertLocationBeforeScope, NestedScope);
@@ -521,7 +541,7 @@ void LocalizingVariablesHandler::processSingleStatementNestedScope(
 
   processSingleStatement(SingleStatementNestedScope->getLocStart(),
                          SingleStatementNestedScope,
-                         AssignmentInsertionsMode::Allowed);
+                         InsertionMode::DeclarationAndAssignment);
 
   popScope();
 }
@@ -556,7 +576,7 @@ void LocalizingVariablesHandler::popScope() {
 
 void LocalizingVariablesHandler::processSingleStatement(
     SourceLocation InsertLocationBeforeStatement, const Stmt *Statement,
-    AssignmentInsertionsMode InsertionMode) {
+    InsertionMode Mode) {
   const auto *DeclarationStatement = llvm::dyn_cast<DeclStmt>(Statement);
 
   if (WasPreviousStatementADeclarationStatement) {
@@ -571,7 +591,7 @@ void LocalizingVariablesHandler::processSingleStatement(
   }
 
   processDeclarationUsesInStatement(InsertLocationBeforeStatement, Statement,
-                                    InsertionMode);
+                                    Mode);
 
   WasPreviousStatementADeclarationStatement = DeclarationStatement != nullptr;
 }
@@ -612,14 +632,14 @@ void LocalizingVariablesHandler::processDeclarationStatement(
 
 void LocalizingVariablesHandler::processDeclarationUsesInStatement(
     SourceLocation InsertLocationBeforeStatement, const Stmt *Statement,
-    AssignmentInsertionsMode InsertionMode) {
+    InsertionMode Mode) {
 
   const VarDecl *SimplyAssignedVariable = nullptr;
-  if (InsertionMode == AssignmentInsertionsMode::Allowed) {
-    auto SimpleAssignmentMatcher = binaryOperator(
+  if (Mode == InsertionMode::DeclarationAndAssignment) {
+    auto SimpleAssignmentMatcher = expr(ignoringCasts(binaryOperator(
         hasOperatorName("="), hasLHS(ignoringCasts(declRefExpr(
                                   to(varDecl().bind("assignedVarDecl"))))),
-        unless(hasRHS(ignoringCasts(binaryOperator(hasOperatorName("="))))));
+        unless(hasRHS(ignoringCasts(binaryOperator(hasOperatorName("="))))))));
     auto AssignmentMatchResult =
         match(SimpleAssignmentMatcher, *Statement, Context);
     if (!AssignmentMatchResult.empty()) {
@@ -648,11 +668,12 @@ void LocalizingVariablesHandler::processDeclarationUsesInStatement(
     VariableUseContext NewVariableUseContext;
     NewVariableUseContext.Statement = ReferenceExpression;
     NewVariableUseContext.ScopeStack = CurrentScopeStack;
-    NewVariableUseContext.InsertLocation = InsertLocationBeforeStatement;
     if (VariableDeclaration == SimplyAssignedVariable) {
       NewVariableUseContext.InsertType = VariableInsertType::AsAssignment;
+      NewVariableUseContext.InsertLocation = Statement->getLocStart();
     } else {
       NewVariableUseContext.InsertType = VariableInsertType::AsDeclaration;
+      NewVariableUseContext.InsertLocation = InsertLocationBeforeStatement;
     }
 
     VariableDeclarationIt->Uses.push_back(std::move(NewVariableUseContext));
